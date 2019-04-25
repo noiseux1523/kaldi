@@ -78,7 +78,7 @@ if [ $stage -le 1 ]; then
   # that are in our vocabulary but not in CMUdict.
   # Saved in data/local/dict_nosp.
   #     silence_phones, optional_phones, nonsil_phones, extra_questions and lexicons
-  # "nosp" refers to the dictionary before silence probabilities and pronunciation
+  # "nosp" refers to the dictionary  before silence probabilities and pronunciation
   # probabilities are added.
   local/prepare_dict.sh --stage 3 --nj 30 --cmd "$train_cmd" \
     data/local/lm data/local/lm data/local/dict_nosp
@@ -101,9 +101,15 @@ if [ $stage -le 1 ]; then
     "<UNK>" data/local/lang_tmp_nosp data/lang_nosp
 
   # Prepares the test time language model(G) transducers
+  # Usage: $0 <lm-dir>
+    # e.g.: $0 /export/a15/vpanayotov/data/lm
   local/format_lms.sh --src-dir data/lang_nosp data/local/lm
   
   # Create ConstArpaLm format language model for full 3-gram and 4-gram LMs
+  # This script reads in an Arpa format language model, and converts it into the
+  # ConstArpaLm format language model.
+  # Usage: 
+  #   $0 [options] <arpa-lm-path> <old-lang-dir> <new-lang-dir>
   utils/build_const_arpa_lm.sh data/local/lm/lm_tglarge.arpa.gz \
     data/lang_nosp data/lang_nosp_test_tglarge
 fi
@@ -116,7 +122,9 @@ Mel Frequency Cepstral Coefficients (MFCC) are the most commonly used features, 
 
 if [ $stage -le 2 ]; then
   mfccdir=mfcc
-  # spread the mfccs over various machines, as this data-set is quite large.
+  # Spread the mfccs over various machines, as this data-set is quite large.
+  # Usage: utils/create_split_dir.pl <actual_storage_dirs> <pseudo_storage_dir>
+  # e.g.: utils/create_split_dir.pl /export/gpu-0{3,4,5}/egs/storage egs/storage
   if [[  $(hostname -f) ==  *.clsp.jhu.edu ]]; then
     mfcc=$(basename mfccdir) # in case was absolute pathname (unlikely), get basename.
     utils/create_split_dir.pl /export/b{07,14,16,17}/$USER/kaldi-data/egs/librispeech/s5/$mfcc/storage \
@@ -124,7 +132,16 @@ if [ $stage -le 2 ]; then
   fi
 
   for part in dev_clean_2 train_clean_5; do
+    # "Usage: $0 [options] <data-dir> [<log-dir> [<mfcc-dir>] ]";
+    # "e.g.: $0 data/train exp/make_mfcc/train mfcc"
+    # "Note: <log-dir> defaults to <data-dir>/log, and <mfccdir> defaults to <data-dir>/data"
     steps/make_mfcc.sh --cmd "$train_cmd" --nj 10 data/$part exp/make_mfcc/$part $mfccdir
+    
+    # Compute cepstral mean and variance statistics per speaker.
+    # We do this in just one job; it's fast.
+    # This script takes no options.
+    # "Usage: $0 [options] <data-dir> [<log-dir> [<cmvn-dir>] ]";
+    # "e.g.: $0 data/train exp/make_mfcc/train mfcc"
     steps/compute_cmvn_stats.sh data/$part exp/make_mfcc/$part $mfccdir
   done
 
@@ -144,13 +161,23 @@ A monophone model is an acoustic model that does not include any contextual info
 # train a monophone system
 if [ $stage -le 3 ]; then
   # TODO(galv): Is this too many jobs for a smaller dataset?
+  # Flat start and monophone training, with delta-delta features.
+  # This script applies cepstral mean normalization (per speaker).
+  # "Usage: steps/train_mono.sh [options] <data-dir> <lang-dir> <exp-dir>"
+  # " e.g.: steps/train_mono.sh data/train.1k data/lang exp/mono"
   steps/train_mono.sh --boost-silence 1.25 --nj 5 --cmd "$train_cmd" \
     data/train_500short data/lang_nosp exp/mono
+    
   # TODO: Understand why we use lang_nosp here...
   (
     utils/mkgraph.sh data/lang_nosp_test_tgsmall \
       exp/mono exp/mono/graph_nosp_tgsmall
+      
     for test in dev_clean_2; do
+      # Usage: steps/decode.sh [options] <graph-dir> <data-dir> <decode-dir>"
+      # ... where <decode-dir> is assumed to be a sub-directory of the directory"
+      #  where the model is."
+      # e.g.: steps/decode.sh exp/mono/graph_tgpr data/test_dev93 exp/mono/decode_dev93_tgpr"
       steps/decode.sh --nj 10 --cmd "$decode_cmd" exp/mono/graph_nosp_tgsmall \
         data/$test exp/mono/decode_nosp_tgsmall_$test
     done
@@ -161,7 +188,9 @@ if [ $stage -le 3 ]; then
 
     The parameters of the acoustic model are estimated in acoustic training steps; however, the process can be better optimized by cycling through training and alignment phases. This is also known as Viterbi training (related, but more computationally expensive procedures include the Forward-Backward algorithm and Expectation Maximization). By aligning the audio to the reference transcript with the most current acoustic model, additional training algorithms can then use this output to improve or refine the parameters of the model. Therefore, each training step will be followed by an alignment step where the audio and text can be realigned.
     """
-
+  
+  # "usage: steps/align_si.sh <data-dir> <lang-dir> <src-dir> <align-dir>"
+  # "e.g.:  steps/align_si.sh data/train data/lang exp/tri1 exp/tri1_ali"
   steps/align_si.sh --boost-silence 1.25 --nj 5 --cmd "$train_cmd" \
     data/train_clean_5 data/lang_nosp exp/mono exp/mono_ali_train_clean_5
 fi
@@ -176,6 +205,8 @@ At this point, we’ll also need to deal with the fact that not all triphone uni
 
 # train a first delta + delta-delta triphone system on all utterances
 if [ $stage -le 4 ]; then
+  # Usage: steps/train_deltas.sh <num-leaves> <tot-gauss> <data-dir> <lang-dir> <alignment-dir> <exp-dir>
+  # e.g.: steps/train_deltas.sh 2000 10000 data/train_si84_half data/lang exp/mono_ali exp/tri1
   steps/train_deltas.sh --boost-silence 1.25 --cmd "$train_cmd" \
     2000 10000 data/train_clean_5 data/lang_nosp exp/mono_ali_train_clean_5 exp/tri1
 
@@ -183,11 +214,21 @@ if [ $stage -le 4 ]; then
   (
     utils/mkgraph.sh data/lang_nosp_test_tgsmall \
       exp/tri1 exp/tri1/graph_nosp_tgsmall
+      
     for test in dev_clean_2; do
       steps/decode.sh --nj 5 --cmd "$decode_cmd" exp/tri1/graph_nosp_tgsmall \
       data/$test exp/tri1/decode_nosp_tgsmall_$test
+      
+      # Do language model rescoring of lattices (remove old LM, add new LM)
+      # Usage: steps/lmrescore.sh [options] <old-lang-dir> <new-lang-dir> <data-dir> 
+      #                                     <input-decode-dir> <output-decode-dir>
       steps/lmrescore.sh --cmd "$decode_cmd" data/lang_nosp_test_{tgsmall,tgmed} \
         data/$test exp/tri1/decode_nosp_{tgsmall,tgmed}_$test
+        
+      # This script rescores lattices with the ConstArpaLm format language model.
+      # Does language model rescoring of lattices (remove old LM, add new LM)
+      # Usage: ... [options] <old-lang-dir> <new-lang-dir> 
+      #                      <data-dir> <input-decode-dir> <output-decode-dir>
       steps/lmrescore_const_arpa.sh \
         --cmd "$decode_cmd" data/lang_nosp_test_{tgsmall,tglarge} \
         data/$test exp/tri1/decode_nosp_{tgsmall,tglarge}_$test
@@ -207,6 +248,8 @@ Repeat steps 5 and 6 with additional triphone training algorithms for more refin
 
 # Train an LDA+MLLT system.
 if [ $stage -le 5 ]; then
+  # "Usage: steps/train_lda_mllt.sh [options] <#leaves> <#gauss> <data> <lang> <alignments> <dir>"
+  # " e.g.: steps/train_lda_mllt.sh 2500 15000 data/train_si84 data/lang exp/tri1_ali_si84 exp/
   steps/train_lda_mllt.sh --cmd "$train_cmd" \
     --splice-opts "--left-context=3 --right-context=3" 2500 15000 \
     data/train_clean_5 data/lang_nosp exp/tri1_ali_train_clean_5 exp/tri2b
@@ -215,24 +258,29 @@ if [ $stage -le 5 ]; then
   (
     utils/mkgraph.sh data/lang_nosp_test_tgsmall \
       exp/tri2b exp/tri2b/graph_nosp_tgsmall
+      
     for test in dev_clean_2; do
       steps/decode.sh --nj 10 --cmd "$decode_cmd" exp/tri2b/graph_nosp_tgsmall \
         data/$test exp/tri2b/decode_nosp_tgsmall_$test
+        
       steps/lmrescore.sh --cmd "$decode_cmd" data/lang_nosp_test_{tgsmall,tgmed} \
         data/$test exp/tri2b/decode_nosp_{tgsmall,tgmed}_$test
+        
       steps/lmrescore_const_arpa.sh \
         --cmd "$decode_cmd" data/lang_nosp_test_{tgsmall,tglarge} \
         data/$test exp/tri2b/decode_nosp_{tgsmall,tglarge}_$test
     done
   )&
 
-  # Align utts using the tri2b model
+  # Realign utts using the tri2b model
   steps/align_si.sh  --nj 5 --cmd "$train_cmd" --use-graphs true \
     data/train_clean_5 data/lang_nosp exp/tri2b exp/tri2b_ali_train_clean_5
 fi
 
 # Train tri3b, which is LDA+MLLT+SAT
 if [ $stage -le 6 ]; then
+  # "Usage: steps/train_sat.sh <#leaves> <#gauss> <data> <lang> <ali-dir> <exp-dir>"
+  # " e.g.: steps/train_sat.sh 2500 15000 data/train_si84 data/lang exp/tri2b_ali_si84 exp/tri3
   steps/train_sat.sh --cmd "$train_cmd" 2500 15000 \
     data/train_clean_5 data/lang_nosp exp/tri2b_ali_train_clean_5 exp/tri3b
 
@@ -240,12 +288,17 @@ if [ $stage -le 6 ]; then
   (
     utils/mkgraph.sh data/lang_nosp_test_tgsmall \
       exp/tri3b exp/tri3b/graph_nosp_tgsmall
+      
     for test in dev_clean_2; do
+      # "Usage: steps/decode_fmllr.sh [options] <graph-dir> <data-dir> <decode-dir>"
+      # " e.g.: steps/decode_fmllr.sh exp/tri2b/graph_tgpr data/test_dev93 exp/tri2b/decode_dev9
       steps/decode_fmllr.sh --nj 10 --cmd "$decode_cmd" \
         exp/tri3b/graph_nosp_tgsmall data/$test \
         exp/tri3b/decode_nosp_tgsmall_$test
+        
       steps/lmrescore.sh --cmd "$decode_cmd" data/lang_nosp_test_{tgsmall,tgmed} \
         data/$test exp/tri3b/decode_nosp_{tgsmall,tgmed}_$test
+        
       steps/lmrescore_const_arpa.sh \
         --cmd "$decode_cmd" data/lang_nosp_test_{tgsmall,tglarge} \
         data/$test exp/tri3b/decode_nosp_{tgsmall,tglarge}_$test
@@ -256,9 +309,19 @@ fi
 # Now we compute the pronunciation and silence probabilities from training data,
 # and re-create the lang directory.
 if [ $stage -le 7 ]; then
+  # usage: $0 <data-dir> <lang-dir> <dir>
+  # e.g.:  $0 data/train data/lang exp/tri3
+  # or:  $0 data/train data/lang exp/tri3/decode_dev
   steps/get_prons.sh --cmd "$train_cmd" \
     data/train_clean_5 data/lang_nosp exp/tri3b
     
+  # Usage: $0 [options] <input-dict-dir> <input-pron-counts> \\"
+  #           [input-sil-counts] [input-bigram-counts] <output-dict-dir>"
+  #  e.g.: $0 data/local/dict \\"
+  #           exp/tri3/pron_counts_nowb.txt exp/tri3/sil_counts_nowb.txt \\"
+  #           exp/tri3/pron_bigram_counts_nowb.txt data/local/dict_prons"
+  #  e.g.: $0 data/local/dict \\"
+  #           exp/tri3/pron_counts_nowb.txt data/local/dict_prons"
   utils/dict_dir_add_pronprobs.sh --max-normalize true \
     data/local/dict_nosp \
     exp/tri3b/pron_counts_nowb.txt exp/tri3b/sil_counts_nowb.txt \
@@ -272,6 +335,8 @@ if [ $stage -le 7 ]; then
   utils/build_const_arpa_lm.sh \
     data/local/lm/lm_tglarge.arpa.gz data/lang data/lang_test_tglarge
 
+  # "usage: steps/align_fmllr.sh <data-dir> <lang-dir> <src-dir> <align-dir>"
+  # "e.g.:  steps/align_fmllr.sh data/train data/lang exp/tri1 exp/tri1_ali"
   steps/align_fmllr.sh --nj 5 --cmd "$train_cmd" \
     data/train_clean_5 data/lang exp/tri3b exp/tri3b_ali_train_clean_5
 fi
